@@ -13,7 +13,7 @@ only). A provider needs its API key configured (see `docs/DEPLOYMENT.md`).
 | ------------- | ---------------------- | ------------------------ | -------------------------------------- |
 | `openai`      | `OPENAI_API_KEY`       | `gpt-4o-mini`            | `https://api.openai.com/v1/...`        |
 | `anthropic`   | `ANTHROPIC_API_KEY`    | `claude-3-5-haiku-latest`| `https://api.anthropic.com/v1/...`     |
-| `gemini`      | `GEMINI_API_KEY`       | `gemini-2.0-flash`       | `https://generativelanguage.googleapis.com/v1beta/...` |
+| `gemini`      | `GEMINI_API_KEY`       | `gemini-2.5-flash`       | `https://generativelanguage.googleapis.com/v1beta/...` |
 | `mock`        | — (none)               | `mock-1`                 | local, dev/test only                   |
 
 Model defaults can be overridden per provider with `{PROVIDER}_MODEL`.
@@ -48,9 +48,16 @@ responses are never surfaced (they can contain request content or key details).
 
 `POST /api/chat` responds as SSE with frames:
 
-- `event: delta`  → `{"delta":"..."}` streamed tokens
-- `event: done`   → `{"conversationId":"...","message":{...}}` the persisted reply
-- `event: error`  → `{"code":"...","message":"..."}` a mid-stream failure
+- `event: delta`    → `{"delta":"..."}` streamed tokens
+- `event: done`     → `{"conversationId":"...","message":{...},"provider":"...","model":"..."}` the persisted reply and the provider/model that produced it
+- `event: error`    → `{"code":"...","message":"..."}` a mid-stream failure
+- `event: fallback` → `{"provider":"..."}` emitted before retrying with another provider after a pre-stream quota hit
+
+When the selected provider answers with a quota error (e.g. OpenAI
+`insufficient_quota`) before sending any tokens, the server transparently
+retries the same turn with the next real provider that has a configured key,
+updates the conversation's recorded provider/model, and streams a `fallback`
+event so the UI can say so.
 
 Each turn persists the user message before streaming and the assistant message
 after the stream completes (so a crash never saves partial output).

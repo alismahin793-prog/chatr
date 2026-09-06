@@ -259,7 +259,7 @@ describe("GeminiProvider", () => {
     let capturedBody: unknown;
     const fetchImpl = stubFetch((url, init) => {
       capturedBody = JSON.parse(String(init.body));
-      expect(url).toContain("/v1beta/models/gemini-2.0-flash:streamGenerateContent");
+      expect(url).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
       return streamResponse([
         'data: {"candidates":[{"content":{"parts":[{"text":"Once"}]},"finishReason":"STOP"}]}',
         'data: {"candidates":[{"content":{"parts":[{"text":" upon a time"}]},"finishReason":"STOP"}]}',
@@ -292,6 +292,40 @@ describe("GeminiProvider", () => {
     await expect(
       collect(new GeminiProvider({ apiKey: "k", fetchImpl }).chat({ messages: MESSAGES }))
     ).rejects.toMatchObject({ code: "RATE_LIMITED", retryable: true });
+  });
+
+  it("maps a 400 invalid key to AUTH", async () => {
+    const fetchImpl = stubFetch(() =>
+      jsonReponse(
+        400,
+        '{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}'
+      )
+    );
+    await expect(
+      collect(new GeminiProvider({ apiKey: "badkey", fetchImpl }).chat({ messages: MESSAGES }))
+    ).rejects.toMatchObject({ code: "AUTH", provider: "gemini", retryable: false });
+  });
+
+  it("maps a mid-stream quota error to QUOTA_EXCEEDED", async () => {
+    const fetchImpl = stubFetch(() =>
+      streamResponse([
+        'data: {"candidates":[{"content":{"parts":[{"text":"Partial"}]},"finishReason":null}]}',
+        'data: {"error":{"code":429,"message":"Requests to the Gemini API have exceeded the hourly request quota.","status":"RESOURCE_EXHAUSTED"}}',
+      ])
+    );
+    await expect(
+      collect(new GeminiProvider({ apiKey: "k", fetchImpl }).chat({ messages: MESSAGES }))
+    ).rejects.toMatchObject({ code: "QUOTA_EXCEEDED" });
+  });
+
+  it("defaults to gemini-2.5-flash without an override", async () => {
+    let capturedUrl = "";
+    const fetchImpl = stubFetch((url) => {
+      capturedUrl = String(url);
+      return streamResponse([]);
+    });
+    await collect(new GeminiProvider({ apiKey: "k", fetchImpl }).chat({ messages: MESSAGES }));
+    expect(capturedUrl).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
   });
 });
 

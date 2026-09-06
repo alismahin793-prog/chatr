@@ -15,14 +15,20 @@ export class ApiRequestError extends Error {
 }
 
 export interface ChatSseFrame {
-  event: "delta" | "done" | "error";
+  event: "delta" | "done" | "error" | "fallback";
   data: Record<string, unknown>;
 }
 
 export interface ChatSseHandlers {
   onDelta?: (delta: string) => void;
-  onDone?: (payload: { conversationId: string; message: Record<string, unknown> }) => void;
+  onDone?: (payload: {
+    conversationId: string;
+    message: Record<string, unknown>;
+    provider?: string;
+    model?: string;
+  }) => void;
   onError?: (payload: { code: string; message: string }) => void;
+  onFallback?: (payload: { provider: string }) => void;
 }
 
 function parseFrame(frame: string): ChatSseFrame | null {
@@ -30,7 +36,7 @@ function parseFrame(frame: string): ChatSseFrame | null {
   const d = frame.match(/^data: (.+)$/m);
   if (!d) return null;
   const event = m?.[1];
-  if (event !== "delta" && event !== "done" && event !== "error") return null;
+  if (event !== "delta" && event !== "done" && event !== "error" && event !== "fallback") return null;
   try {
     return { event, data: JSON.parse(d[1]) as Record<string, unknown> };
   } catch {
@@ -81,12 +87,16 @@ export async function readSseStream(
       handlers.onDone?.({
         conversationId: String(parsed.data.conversationId),
         message: (parsed.data.message ?? {}) as Record<string, unknown>,
+        provider: parsed.data.provider !== undefined ? String(parsed.data.provider) : undefined,
+        model: parsed.data.model !== undefined ? String(parsed.data.model) : undefined,
       });
     } else if (parsed.event === "error") {
       handlers.onError?.({
         code: String(parsed.data.code ?? "internal"),
         message: String(parsed.data.message ?? "An unexpected error occurred."),
       });
+    } else if (parsed.event === "fallback") {
+      handlers.onFallback?.({ provider: String(parsed.data.provider ?? "") });
     }
   };
 

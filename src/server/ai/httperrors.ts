@@ -33,6 +33,10 @@ export function classifyHttpError(
     if (/content_filter|safety|unsupported_content/i.test(combined)) {
       return new ProviderError(provider, "CONTENT_FILTER", "Content blocked by safety filters.", false, status);
     }
+    if (/api.?key not valid|invalid.?api.?key|api_key_invalid/i.test(combined)) {
+      // Gemini rejects bad keys with a 400 INVALID_ARGUMENT response.
+      return new ProviderError(provider, "AUTH", "Invalid API key or credentials.", false, status);
+    }
     return new ProviderError(provider, "BAD_REQUEST", "Provider rejected the request.", false, status);
   }
 

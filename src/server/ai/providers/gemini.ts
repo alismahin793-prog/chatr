@@ -24,7 +24,7 @@ interface GeminiStreamEvent {
 export class GeminiProvider implements ChatProvider {
   readonly id: ProviderId;
   readonly displayName = "Google Gemini";
-  readonly availableModels = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"] as const;
+  readonly availableModels = ["gemini-2.5-flash"] as const;
 
   private readonly apiKey: string;
   private readonly model: string;
@@ -33,7 +33,7 @@ export class GeminiProvider implements ChatProvider {
   constructor(options: GeminiProviderOptions) {
     this.id = "gemini";
     this.apiKey = options.apiKey;
-    this.model = options.model ?? "gemini-2.0-flash";
+    this.model = options.model ?? "gemini-2.5-flash";
     this.fetchImpl = resolveFetch(options.fetchImpl);
   }
 
@@ -73,12 +73,14 @@ export class GeminiProvider implements ChatProvider {
     for await (const event of iterSseData(response, this.id)) {
       const evt = event as GeminiStreamEvent;
       if (evt.error?.message) {
+        const isResourceExhausted =
+          evt.error.status === "RESOURCE_EXHAUSTED" && evt.error.code === 429;
         throw new ProviderError(
           this.id,
-          evt.error.status &&
-            /RESOURCE_EXHAUSTED|RATE_LIMITED/.test(evt.error.status) &&
-            evt.error.code === 429
-            ? "RATE_LIMITED"
+          isResourceExhausted
+            ? /quota|exceeded/i.test(evt.error.message)
+              ? "QUOTA_EXCEEDED"
+              : "RATE_LIMITED"
             : "BAD_REQUEST",
           `Gemini mid-stream error: ${evt.error.message}`
         );

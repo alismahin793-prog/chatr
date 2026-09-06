@@ -1,11 +1,12 @@
-import type { ChatMessage, ProviderId } from "@/server/ai/types";
-import { createProvider } from "@/server/ai/factory";
+import type { ChatMessage, ChatProvider, ProviderId } from "@/server/ai/types";
+import { createProvider, fallbackProviderIds } from "@/server/ai/factory";
 import { ProviderError } from "@/server/ai/errors";
 import { requireUser, readJsonBody, toApiError, providerErrorMessage } from "@/server/api/helpers";
 import { getAiSettings, maxContextMessages } from "@/server/config/env";
 import {
   createConversation,
   getConversation,
+  updateConversationProvider,
   type ConversationRecord,
 } from "@/server/data/conversations";
 import { insertMessage, listMessages } from "@/server/data/messages";
@@ -19,7 +20,7 @@ const encoder = new TextEncoder();
 
 function sendEvent(
   controller: ReadableStreamDefaultController<Uint8Array>,
-  event: "delta" | "done" | "error",
+  event: "delta" | "done" | "error" | "fallback",
   payload: unknown
 ) {
   controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`));
@@ -61,19 +62,61 @@ export async function POST(request: Request) {
 
     const activeProvider: ProviderId =
       providerId ?? (conversation.provider as ProviderId | null) ?? getAiSettings().provider;
-    const provider = createProvider(activeProvider, { model: model ?? undefined });
+    // Built before the stream starts so a missing key degrades to a JSON error.
+    const primaryProvider = createProvider(activeProvider, { model: model ?? undefined });
+
+    // Fallback chain: the selected provider first, then the other real
+    // providers with a configured key (each using its own default model).
+    const candidates: Array<{ id: ProviderId; model?: string; provider?: ChatProvider }> = [
+      { id: activeProvider, model: model ?? undefined, provider: primaryProvider },
+      ...fallbackProviderIds(activeProvider).map((id) => ({ id, provider: undefined })),
+    ];
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         let assistantText = "";
+        let usedProviderId: ProviderId = activeProvider;
+        let usedModel = model ?? undefined;
         try {
-          for await (const chunk of provider.chat({
-            messages: context,
-            model: model ?? undefined,
-            signal: request.signal,
-          })) {
-            assistantText += chunk.delta;
-            sendEvent(controller, "delta", { delta: chunk.delta });
+          for (let i = 0; i < candidates.length; i++) {
+            const candidate = candidates[i];
+            let streamedAny = false;
+            try {
+              const provider = candidate.provider ??
+                createProvider(candidate.id, { model: candidate.model });
+              usedProviderId = candidate.id;
+              usedModel = candidate.model ?? provider.defaultModel;
+
+              for await (const chunk of provider.chat({
+                messages: context,
+                model: candidate.model ?? undefined,
+                signal: request.signal,
+              })) {
+                streamedAny = true;
+                assistantText += chunk.delta;
+                sendEvent(controller, "delta", { delta: chunk.delta });
+              }
+              break;
+            } catch (err) {
+              // Only fall back when the provider hit its usage quota before
+              // streaming any content. Anything else (mid-stream failure,
+              // auth, rate limit, invalid request) surfaces as an error.
+              const lastCandidate = i === candidates.length - 1;
+              const quotaBeforeStream =
+                err instanceof ProviderError && err.code === "QUOTA_EXCEEDED" && !streamedAny;
+              if (lastCandidate || !quotaBeforeStream) throw err;
+              sendEvent(controller, "fallback", { provider: candidates[i + 1].id });
+            }
+          }
+
+          if (usedProviderId !== conversation.provider) {
+            await updateConversationProvider(
+              supabase,
+              conversation.id,
+              user.id,
+              usedProviderId,
+              usedModel ?? ""
+            );
           }
 
           const assistantMessage = await insertMessage(
@@ -85,6 +128,8 @@ export async function POST(request: Request) {
           sendEvent(controller, "done", {
             conversationId: conversation.id,
             message: assistantMessage,
+            provider: usedProviderId,
+            model: usedModel,
           });
         } catch (err) {
           if (request.signal.aborted) {

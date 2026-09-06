@@ -183,6 +183,54 @@ describe("ChatWorkspace", () => {
     expect(await screen.findByText("AI provider is not configured.")).toBeTruthy();
   });
 
+  it("shows a fallback notice and the reply when the server retries with another provider", async () => {
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/models") {
+        return jsonResponse(200, {
+          providers: [
+            { id: "openai", displayName: "OpenAI", defaultModel: "gpt-4o-mini", availableModels: [] },
+            {
+              id: "gemini",
+              displayName: "Google Gemini",
+              defaultModel: "gemini-2.5-flash",
+              availableModels: [],
+            },
+          ],
+        });
+      }
+      if (url === "/api/chat") {
+        return sseResponse([
+          { event: "fallback", data: { provider: "gemini" } },
+          { event: "delta", data: { delta: "Answered!" } },
+          {
+            event: "done",
+            data: {
+              conversationId: CONV_ID,
+              message: {
+                id: "m-2",
+                conversation_id: CONV_ID,
+                role: "assistant",
+                content: "Answered!",
+                created_at: "2026-01-03T00:00:00.000Z",
+              },
+              provider: "gemini",
+              model: "gemini-2.5-flash",
+            },
+          },
+        ]);
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: "nope" } });
+    });
+
+    render(<ChatWorkspace userId={USER_ID} initialConversations={[]} />);
+    typeMessage("fallback me");
+    fireEvent.click(screen.getByText("Send"));
+
+    expect(await screen.findByText(/usage limit/)).toBeTruthy();
+    expect(await screen.findByText(/Answered!/)).toBeTruthy();
+  });
+
   it("deletes a conversation", async () => {
     render(<ChatWorkspace userId={USER_ID} initialConversations={initialConversations} />);
     fireEvent.click(screen.getByLabelText("Delete conversation First chat"));

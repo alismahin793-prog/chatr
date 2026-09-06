@@ -88,6 +88,27 @@ export async function updateConversationTitle(
   return data;
 }
 
+/** Records which provider/model actually answered a conversation (e.g. after a fallback). */
+export async function updateConversationProvider(
+  supabase: SupabaseClient<Database>,
+  id: string,
+  userId: string,
+  provider: string,
+  model: string
+): Promise<ConversationRecord> {
+  const { data, error } = await supabase
+    .from("conversations")
+    .update({ provider, model })
+    .eq("id", id)
+    .eq("user_id", userId)
+    .select("*")
+    .single();
+
+  if (error) throw supabaseErrorToAppError(error);
+  if (!data) throw new NotFoundError("Conversation not found.");
+  return data;
+}
+
 /** Deletes a conversation and (via cascade) its messages. */
 export async function deleteConversation(
   supabase: SupabaseClient<Database>,

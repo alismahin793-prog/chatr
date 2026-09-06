@@ -4,9 +4,10 @@ import { createClient } from "@/lib/supabase/server";
 import {
   createConversation,
   getConversation,
+  updateConversationProvider,
 } from "@/server/data/conversations";
 import { insertMessage, listMessages } from "@/server/data/messages";
-import { createProvider } from "@/server/ai/factory";
+import { createProvider, fallbackProviderIds } from "@/server/ai/factory";
 import type { ChatProvider } from "@/server/ai/types";
 import { ProviderError } from "@/server/ai/errors";
 
@@ -15,6 +16,7 @@ vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/server/data/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
+  updateConversationProvider: vi.fn(),
 }));
 
 vi.mock("@/server/data/messages", () => ({
@@ -27,7 +29,10 @@ vi.mock("@/server/config/env", () => ({
   maxContextMessages: vi.fn(() => 20),
 }));
 
-vi.mock("@/server/ai/factory", () => ({ createProvider: vi.fn() }));
+vi.mock("@/server/ai/factory", () => ({
+  createProvider: vi.fn(),
+  fallbackProviderIds: vi.fn(() => []),
+}));
 
 const USER = { id: "11111111-1111-4111-8111-111111111111", email: "a@example.com" };
 const CONV_ID = "22222222-2222-4222-8222-222222222222";
@@ -58,12 +63,16 @@ function saved(message: {
   } as const;
 }
 
-function stubProvider(chunks: string[], err?: ProviderError): ChatProvider {
+function stubProvider(
+  chunks: string[],
+  err?: ProviderError,
+  overrides: Partial<Pick<ChatProvider, "id" | "displayName" | "defaultModel" | "availableModels">> = {}
+): ChatProvider {
   return {
-    id: "mock",
-    displayName: "Mock",
-    defaultModel: "mock-1",
-    availableModels: ["mock-1"],
+    id: overrides.id ?? "mock",
+    displayName: overrides.displayName ?? "Mock",
+    defaultModel: overrides.defaultModel ?? "mock-1",
+    availableModels: overrides.availableModels ?? ["mock-1"],
     async *chat() {
       for (const c of chunks) {
         await Promise.resolve();
@@ -110,6 +119,8 @@ beforeEach(() => {
   vi.mocked(insertMessage).mockImplementation(async (_s, cid, role, content) =>
     saved({ conversation_id: cid, role, content })
   );
+  vi.mocked(fallbackProviderIds).mockReturnValue([]);
+  vi.mocked(updateConversationProvider).mockResolvedValue(CONVERSATION);
 });
 
 describe("POST /api/chat", () => {
@@ -232,5 +243,86 @@ describe("POST /api/chat", () => {
     const res = await POST(chatRequest({ content: "hello there" }));
     expect(res.status).toBe(200);
     expect((await readEvents(res))[0].data).toEqual({ delta: "hi" });
+  });
+
+  describe("automatic provider fallback", () => {
+    it("emits fallback and answers from another provider on a pre-stream quota error", async () => {
+      const openai = stubProvider(
+        [],
+        new ProviderError("openai", "QUOTA_EXCEEDED", "no credits", true, 429),
+        { id: "openai" }
+      );
+      const gemini = stubProvider(["Hel", "lo"], undefined, {
+        id: "gemini",
+        defaultModel: "gemini-2.5-flash",
+      });
+      vi.mocked(createProvider).mockImplementation((id) =>
+        id === "openai" ? openai : gemini
+      );
+      vi.mocked(fallbackProviderIds).mockReturnValue(["gemini"]);
+
+      const res = await POST(
+        chatRequest({ conversationId: CONV_ID, content: "retry me", provider: "openai", model: "gpt-4o-mini" })
+      );
+      const events = await readEvents(res);
+
+      expect(events.map((e) => e.event)).toEqual(["fallback", "delta", "delta", "done"]);
+      expect(events[0].data).toEqual({ provider: "gemini" });
+      expect(events[0].data).not.toHaveProperty("model");
+      const done = events[3].data as { provider: string; model: string };
+      expect(done.provider).toBe("gemini");
+      expect(done.model).toBe("gemini-2.5-flash");
+      // Assistant reply persisted; conversation re-labeled to the provider that answered.
+      expect(insertMessage).toHaveBeenNthCalledWith(2, expect.anything(), CONV_ID, "assistant", "Hello");
+      expect(updateConversationProvider).toHaveBeenCalledWith(
+        expect.anything(),
+        CONV_ID,
+        USER.id,
+        "gemini",
+        "gemini-2.5-flash"
+      );
+    });
+
+    it("does not fall back when quota is exhausted after deltas already streamed", async () => {
+      const openai = stubProvider(
+        ["par"],
+        new ProviderError("openai", "QUOTA_EXCEEDED", "no credits", true, 429),
+        { id: "openai" }
+      );
+      vi.mocked(createProvider).mockImplementation(() => openai);
+      vi.mocked(fallbackProviderIds).mockReturnValue(["gemini"]);
+
+      const res = await POST(chatRequest({ provider: "openai", content: "x" }));
+      const events = await readEvents(res);
+
+      expect(events.map((e) => e.event)).toEqual(["delta", "error"]);
+      expect(events[1].data).toEqual({
+        code: "quota_exceeded",
+        message: "AI provider limit reached. Try again shortly.",
+      });
+      expect(createProvider).toHaveBeenCalledTimes(1);
+      expect(insertMessage).toHaveBeenCalledTimes(1);
+      expect(updateConversationProvider).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back on non-quota provider errors", async () => {
+      const openai = stubProvider(
+        [],
+        new ProviderError("openai", "RATE_LIMITED", "slow down", true, 429),
+        { id: "openai" }
+      );
+      vi.mocked(createProvider).mockImplementation(() => openai);
+      vi.mocked(fallbackProviderIds).mockReturnValue(["gemini"]);
+
+      const res = await POST(chatRequest({ provider: "openai", content: "x" }));
+      const events = await readEvents(res);
+
+      expect(events.map((e) => e.event)).toEqual(["error"]);
+      expect(events[0].data).toEqual({
+        code: "rate_limited",
+        message: "AI provider limit reached. Try again shortly.",
+      });
+      expect(updateConversationProvider).not.toHaveBeenCalled();
+    });
   });
 });

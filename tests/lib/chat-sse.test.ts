@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError, readSseStream } from "@/lib/chat-sse";
 
-function sseResponse(frames: Array<{ event: "delta" | "done" | "error"; data: unknown }>): Response {
+function sseResponse(
+  frames: Array<{ event: "delta" | "done" | "error" | "fallback"; data: unknown }>
+): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -51,6 +53,31 @@ describe("readSseStream", () => {
       { onDelta }
     );
     expect(onDelta).toHaveBeenCalledWith("tail");
+  });
+
+  it("dispatches a fallback frame and forwards provider/model on done", async () => {
+    const onFallback = vi.fn();
+    const onDone = vi.fn();
+
+    await readSseStream(
+      sseResponse([
+        { event: "fallback", data: { provider: "gemini" } },
+        { event: "delta", data: { delta: "ok" } },
+        {
+          event: "done",
+          data: { conversationId: "cv2", message: { id: "m2" }, provider: "gemini", model: "gemini-2.5-flash" },
+        },
+      ]),
+      { onFallback, onDone }
+    );
+
+    expect(onFallback).toHaveBeenCalledWith({ provider: "gemini" });
+    expect(onDone).toHaveBeenCalledWith({
+      conversationId: "cv2",
+      message: { id: "m2" },
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+    });
   });
 
   it("ignores unknown event types and malformed frames", async () => {

@@ -31,6 +31,7 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [streamText, setStreamText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [fallbackNote, setFallbackNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const [providers, setProviders] = useState<ProviderDescriptor[]>([]);
@@ -67,6 +68,7 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
     setActiveId(id);
     setStreamText(null);
     setStreamError(null);
+    setFallbackNote(null);
     setBusy(true);
     try {
       const body = await jsonOrThrow<{ messages: MessageRecord[] }>(
@@ -102,6 +104,7 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
       setInput("");
       setStreamText("");
       setStreamError(null);
+      setFallbackNote(null);
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -121,10 +124,20 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
 
         await readSseStream(res, {
           onDelta: (delta) => setStreamText((prev) => `${prev ?? ""}${delta}`),
-          onDone: ({ conversationId, message }) => {
+          onFallback: ({ provider }) => {
+            const name = providers.find((p) => p.id === provider)?.displayName ?? provider;
+            setFallbackNote(
+              `${activeProvider} hit its usage limit — continuing with ${name}.`
+            );
+          },
+          onDone: ({ conversationId, message, provider, model }) => {
             const saved = message as unknown as MessageRecord;
             setMessages((prev) => [...prev, saved]);
             setStreamText(null);
+            if (provider) {
+              setActiveProvider(provider);
+              if (model) setActiveModel(model);
+            }
             if (conversationId && conversationId !== activeId) {
               setActiveId(conversationId);
               setConversations((prev) =>
@@ -134,8 +147,8 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
                       {
                         id: conversationId,
                         title: trimmed.slice(0, 40),
-                        provider: activeProvider,
-                        model: activeModel,
+                        provider: provider ?? activeProvider,
+                        model: model ?? activeModel,
                         created_at: new Date().toISOString(),
                         updated_at: new Date().toISOString(),
                       },
@@ -195,6 +208,7 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
             setMessages([]);
             setStreamError(null);
             setStreamText(null);
+            setFallbackNote(null);
           }}
           className="m-3 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
         >
@@ -320,6 +334,12 @@ export default function ChatWorkspace({ userId, initialConversations }: ChatWork
                 <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-800">
                   {streamText}
                 </div>
+              </div>
+            )}
+
+            {fallbackNote && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+                {fallbackNote}
               </div>
             )}
 

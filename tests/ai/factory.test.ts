@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from "vitest";
-import { createProvider, listAvailableProviders } from "@/server/ai/factory";
+import { createProvider, fallbackProviderIds, listAvailableProviders } from "@/server/ai/factory";
 import { ProviderError } from "@/server/ai/errors";
 import { OpenAIProvider } from "@/server/ai/providers/openai";
 import { AnthropicProvider } from "@/server/ai/providers/anthropic";
@@ -96,5 +96,25 @@ describe("listAvailableProviders", () => {
     } finally {
       setNodeEnv(previous ?? "test");
     }
+  });
+});
+
+describe("fallbackProviderIds", () => {
+  it("returns configured real providers except the excluded one", () => {
+    process.env.OPENAI_API_KEY = "k1";
+    process.env.GEMINI_API_KEY = "k3";
+
+    expect(fallbackProviderIds("openai")).toEqual(["gemini"]);
+    expect(fallbackProviderIds("gemini")).toEqual(["openai"]);
+    expect(fallbackProviderIds("anthropic")).toEqual(["openai", "gemini"]);
+  });
+
+  it("never includes mock or providers without a key", () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+
+    expect(fallbackProviderIds("mock")).toEqual([]);
+    expect(fallbackProviderIds("openai")).toEqual([]);
   });
 });
