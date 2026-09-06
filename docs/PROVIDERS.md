@@ -13,7 +13,7 @@ only). A provider needs its API key configured (see `docs/DEPLOYMENT.md`).
 | ------------- | ---------------------- | ------------------------ | -------------------------------------- |
 | `openai`      | `OPENAI_API_KEY`       | `gpt-4o-mini`            | `https://api.openai.com/v1/...`        |
 | `anthropic`   | `ANTHROPIC_API_KEY`    | `claude-3-5-haiku-latest`| `https://api.anthropic.com/v1/...`     |
-| `gemini`      | `GEMINI_API_KEY`       | `gemini-2.5-flash`       | `https://generativelanguage.googleapis.com/v1beta/...` |
+| `gemini`      | `GEMINI_API_KEY`       | `gemini-3.6-flash`       | `https://generativelanguage.googleapis.com/v1beta/...` |
 | `mock`        | — (none)               | `mock-1`                 | local, dev/test only                   |
 
 Model defaults can be overridden per provider with `{PROVIDER}_MODEL`.

@@ -65,7 +65,7 @@ describe("readSseStream", () => {
         { event: "delta", data: { delta: "ok" } },
         {
           event: "done",
-          data: { conversationId: "cv2", message: { id: "m2" }, provider: "gemini", model: "gemini-2.5-flash" },
+          data: { conversationId: "cv2", message: { id: "m2" }, provider: "gemini", model: "gemini-3.6-flash" },
         },
       ]),
       { onFallback, onDone }
@@ -76,7 +76,7 @@ describe("readSseStream", () => {
       conversationId: "cv2",
       message: { id: "m2" },
       provider: "gemini",
-      model: "gemini-2.5-flash",
+      model: "gemini-3.6-flash",
     });
   });
 

@@ -254,7 +254,7 @@ describe("POST /api/chat", () => {
       );
       const gemini = stubProvider(["Hel", "lo"], undefined, {
         id: "gemini",
-        defaultModel: "gemini-2.5-flash",
+        defaultModel: "gemini-3.6-flash",
       });
       vi.mocked(createProvider).mockImplementation((id) =>
         id === "openai" ? openai : gemini
@@ -271,7 +271,7 @@ describe("POST /api/chat", () => {
       expect(events[0].data).not.toHaveProperty("model");
       const done = events[3].data as { provider: string; model: string };
       expect(done.provider).toBe("gemini");
-      expect(done.model).toBe("gemini-2.5-flash");
+      expect(done.model).toBe("gemini-3.6-flash");
       // Assistant reply persisted; conversation re-labeled to the provider that answered.
       expect(insertMessage).toHaveBeenNthCalledWith(2, expect.anything(), CONV_ID, "assistant", "Hello");
       expect(updateConversationProvider).toHaveBeenCalledWith(
@@ -279,7 +279,7 @@ describe("POST /api/chat", () => {
         CONV_ID,
         USER.id,
         "gemini",
-        "gemini-2.5-flash"
+        "gemini-3.6-flash"
       );
     });
 

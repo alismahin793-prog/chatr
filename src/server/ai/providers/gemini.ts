@@ -24,7 +24,7 @@ interface GeminiStreamEvent {
 export class GeminiProvider implements ChatProvider {
   readonly id: ProviderId;
   readonly displayName = "Google Gemini";
-  readonly availableModels = ["gemini-2.5-flash"] as const;
+  readonly availableModels = ["gemini-3.6-flash"] as const;
 
   private readonly apiKey: string;
   private readonly model: string;
@@ -33,7 +33,7 @@ export class GeminiProvider implements ChatProvider {
   constructor(options: GeminiProviderOptions) {
     this.id = "gemini";
     this.apiKey = options.apiKey;
-    this.model = options.model ?? "gemini-2.5-flash";
+    this.model = options.model ?? "gemini-3.6-flash";
     this.fetchImpl = resolveFetch(options.fetchImpl);
   }
 

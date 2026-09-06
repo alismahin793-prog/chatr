@@ -24,7 +24,7 @@ export interface ProviderFactoryOptions {
 const DESCRIPTORS: Record<ProviderId, Omit<ProviderDescriptor, "id">> = {
   openai: { displayName: "OpenAI", defaultModel: "gpt-4o-mini", availableModels: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"] },
   anthropic: { displayName: "Anthropic", defaultModel: "claude-3-5-haiku-latest", availableModels: ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"] },
-  gemini: { displayName: "Google Gemini", defaultModel: "gemini-2.5-flash", availableModels: ["gemini-2.5-flash"] },
+  gemini: { displayName: "Google Gemini", defaultModel: "gemini-3.6-flash", availableModels: ["gemini-3.6-flash"] },
   mock: { displayName: "Mock (development)", defaultModel: "mock-1", availableModels: ["mock-1"] },
 };
 

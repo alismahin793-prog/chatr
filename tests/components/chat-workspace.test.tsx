@@ -193,7 +193,7 @@ describe("ChatWorkspace", () => {
             {
               id: "gemini",
               displayName: "Google Gemini",
-              defaultModel: "gemini-2.5-flash",
+              defaultModel: "gemini-3.6-flash",
               availableModels: [],
             },
           ],
@@ -215,7 +215,7 @@ describe("ChatWorkspace", () => {
                 created_at: "2026-01-03T00:00:00.000Z",
               },
               provider: "gemini",
-              model: "gemini-2.5-flash",
+              model: "gemini-3.6-flash",
             },
           },
         ]);

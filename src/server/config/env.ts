@@ -8,7 +8,7 @@ export interface AiSettings {
 const DEFAULT_MODELS: Record<Exclude<ProviderId, "mock">, string> = {
   openai: "gpt-4o-mini",
   anthropic: "claude-3-5-haiku-latest",
-  gemini: "gemini-2.0-flash",
+  gemini: "gemini-3.6-flash",
 };
 
 function resolveProvider(raw: string | undefined): ProviderId {

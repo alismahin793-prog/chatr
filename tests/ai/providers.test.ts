@@ -259,7 +259,7 @@ describe("GeminiProvider", () => {
     let capturedBody: unknown;
     const fetchImpl = stubFetch((url, init) => {
       capturedBody = JSON.parse(String(init.body));
-      expect(url).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
+      expect(url).toContain("/v1beta/models/gemini-3.6-flash:streamGenerateContent");
       return streamResponse([
         'data: {"candidates":[{"content":{"parts":[{"text":"Once"}]},"finishReason":"STOP"}]}',
         'data: {"candidates":[{"content":{"parts":[{"text":" upon a time"}]},"finishReason":"STOP"}]}',
@@ -318,14 +318,14 @@ describe("GeminiProvider", () => {
     ).rejects.toMatchObject({ code: "QUOTA_EXCEEDED" });
   });
 
-  it("defaults to gemini-2.5-flash without an override", async () => {
+  it("defaults to gemini-3.6-flash without an override", async () => {
     let capturedUrl = "";
     const fetchImpl = stubFetch((url) => {
       capturedUrl = String(url);
       return streamResponse([]);
     });
     await collect(new GeminiProvider({ apiKey: "k", fetchImpl }).chat({ messages: MESSAGES }));
-    expect(capturedUrl).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
+    expect(capturedUrl).toContain("/v1beta/models/gemini-3.6-flash:streamGenerateContent");
   });
 });
 
