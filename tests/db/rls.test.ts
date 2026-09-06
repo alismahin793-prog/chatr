@@ -13,10 +13,30 @@ import { PGlite } from "@electric-sql/pglite";
  * exactly as they would be on a cloud project.
  */
 
-const MIGRATION = resolve(
+const INIT_MIGRATION = resolve(
   process.cwd(),
   "supabase/migrations/20260101000000_init.sql"
 );
+
+const ADMIN_MIGRATION = resolve(
+  process.cwd(),
+  "supabase/migrations/20260102000000_admin_security.sql"
+);
+
+const PERMISSIONS_MIGRATION = resolve(
+  process.cwd(),
+  "supabase/migrations/20260103000000_admin_permissions.sql"
+);
+
+/** Reads a migration and neutralizes the pgcrypto prelude for PGlite. */
+function readMigration(path: string) {
+  return readFileSync(path, "utf8").replace(
+    // Supabase's managed Postgres ships pgcrypto; PGlite does not, but it
+    // runs PostgreSQL 17 where gen_random_uuid() lives in core anyway.
+    "create extension if not exists pgcrypto;",
+    "-- pgcrypto: preinstalled on Supabase; gen_random_uuid() is core on PG13+"
+  );
+}
 
 async function rowCount(db: PGlite, sql: string, params: unknown[]) {
   const result = await db.query<{ count: string }>(sql, params);
@@ -34,6 +54,17 @@ async function expectPolicyViolation(promise: Promise<unknown>) {
   expect(threw).toBe(true);
 }
 
+async function expectPermissionDenied(promise: Promise<unknown>) {
+  let threw = false;
+  try {
+    await promise;
+  } catch (err) {
+    threw = true;
+    expect(String(err)).toMatch(/permission denied/i);
+  }
+  expect(threw).toBe(true);
+}
+
 describe("supabase migration + RLS data isolation", () => {
   let db: PGlite;
   let userIdA: string;
@@ -42,6 +73,11 @@ describe("supabase migration + RLS data isolation", () => {
   beforeAll(async () => {
     db = new PGlite();
     await db.exec("create schema auth;");
+
+    // Roles must exist before the admin migration runs: it revokes column-level
+    // privileges from 'anon' and 'authenticated'.
+    await db.exec("create role anon;");
+    await db.exec("create role authenticated;");
 
     // --- auth schema shim (mirrors Supabase GoTrue layout) -------------
     await db.exec(`
@@ -63,26 +99,41 @@ describe("supabase migration + RLS data isolation", () => {
       $$;
     `);
 
-    // --- apply the real migration --------------------------------------
-    const migrationSql = readFileSync(MIGRATION, "utf8").replace(
-      // Supabase's managed Postgres ships pgcrypto; PGlite does not, but it
-      // runs PostgreSQL 17 where gen_random_uuid() lives in core anyway.
-      "create extension if not exists pgcrypto;",
-      "-- pgcrypto: preinstalled on Supabase; gen_random_uuid() is core on PG13+"
-    );
+    // --- apply the real migrations (init + admin security + permissions) --
+    const migrationSql = [
+      readMigration(INIT_MIGRATION),
+      readMigration(ADMIN_MIGRATION),
+      readMigration(PERMISSIONS_MIGRATION),
+    ].join("\n\n-- ===== subsequent migration =====\n\n");
     await db.exec(migrationSql);
 
-    // --- roles & privileges matching a Supabase project -----------------
+    // --- roles & privileges matching a Supabase project -----------------.
+    // Supabase's default grants are installed after our migration's revokes,
+    // so re-apply the revokes to land in the same post-migration state as a
+    // real cloud project (where the migration runs after the defaults).
     try {
-      await db.exec("create role authenticated;");
+      await db.exec("grant usage on schema public to authenticated;");
     } catch {
-      /* role already exists */
+      /* already granted */
     }
     await db.exec(`
-      grant usage on schema public to authenticated;
       grant all on all tables in schema public to authenticated;
       grant usage on schema auth to authenticated;
       grant execute on all functions in schema auth to authenticated;
+    `);
+    await db.exec(`
+      revoke insert on public.profiles from anon;
+      revoke insert on public.profiles from authenticated;
+      revoke update on public.profiles from anon;
+      revoke update on public.profiles from authenticated;
+      grant update (display_name) on public.profiles to anon;
+      grant update (display_name) on public.profiles to authenticated;
+      revoke all on public.audit_log from anon;
+      revoke all on public.audit_log from authenticated;
+      revoke all on public.admin_permissions from anon;
+      revoke all on public.admin_permissions from authenticated;
+      grant select on public.admin_permissions to authenticated;
+      grant select on public.admin_permissions to anon;
     `);
 
     // Emulate GoTrue creating two users (profile rows are auto-created).
@@ -116,6 +167,8 @@ describe("supabase migration + RLS data isolation", () => {
       []
     );
     expect(tables.rows.map((r) => r.tablename)).toEqual([
+      "admin_permissions",
+      "audit_log",
       "conversations",
       "messages",
       "profiles",
@@ -134,7 +187,7 @@ describe("supabase migration + RLS data isolation", () => {
     );
 
     const rls = await db.query<{ relrowsecurity: boolean }>(
-      `select relrowsecurity from pg_class where relname in ('profiles','conversations','messages')`,
+      `select relrowsecurity from pg_class where relname in ('profiles','conversations','messages','audit_log','admin_permissions')`,
       []
     );
     expect(rls.rows.map((r) => r.relrowsecurity).every((v) => v === true)).toBe(true);
@@ -289,5 +342,206 @@ describe("supabase migration + RLS data isolation", () => {
     const missing = await rowCount(db, "select count(*) from conversations where id = $1", [conv.id]);
     expect(missing).toBe(0);
     await db.exec("commit;");
+  });
+
+  it("every account gets the plain 'user' role by default", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    const [row] = (
+      await db.query<{ role: string; admin_verified_at: unknown }>(
+        "select role, admin_verified_at from profiles where id = $1",
+        [userIdA]
+      )
+    ).rows;
+    expect(row.role).toBe("user");
+    expect(row.admin_verified_at).toBeNull();
+    await db.exec("commit;");
+  });
+
+  it("tenants cannot promote themselves to admin", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query("update profiles set role = 'admin' where id = $1", [userIdA])
+    );
+    await db.exec("rollback;");
+  });
+
+  it("tenants cannot forge an admin re-authentication timestamp", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query("update profiles set admin_verified_at = now() where id = $1", [userIdA])
+    );
+    await db.exec("rollback;");
+  });
+
+  it("tenants can still update their own display_name", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await db.query("update profiles set display_name = 'Alice Renamed' where id = $1", [
+      userIdA,
+    ]);
+    const [row] = (
+      await db.query<{ display_name: string }>(
+        "select display_name from profiles where id = $1",
+        [userIdA]
+      )
+    ).rows;
+    expect(row.display_name).toBe("Alice Renamed");
+    await db.exec("commit;");
+  });
+
+  it("audit_log is unreadable and unwritable by tenants", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(db.query("select count(*) from audit_log", []));
+    await db.exec("rollback;");
+
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query("insert into audit_log (actor_id, action) values ($1, 'admin.status')", [userIdA])
+    );
+    await db.exec("rollback;");
+  });
+
+  it("the service role (privileged path) can write audit entries", async () => {
+    // Runs as the table owner (superuser in PGlite), mirroring service-role
+    // writes which bypass RLS and column grants.
+    const [row] = (
+      await db.query<{ id: string }>(
+        `insert into audit_log (actor_id, action, success, metadata)
+         values ($1, 'admin.reauth', true, '{}'::jsonb) returning id`,
+        [userIdA]
+      )
+    ).rows;
+    expect(row.id).toBeTruthy();
+    expect(await rowCount(db, "select count(*) from audit_log", [])).toBe(1);
+  });
+
+  it("no user has any admin permission by default", async () => {
+    const count = await rowCount(db, "select count(*) from admin_permissions", []);
+    expect(count).toBe(0);
+  });
+
+  it("service role can grant and revoke admin permissions", async () => {
+    const [row] = (
+      await db.query<{ id: string }>(
+        `insert into admin_permissions (user_id, permission, granted_by)
+         values ($1, 'view_users', $2) returning id`,
+        [userIdA, userIdB]
+      )
+    ).rows;
+    expect(row.id).toBeTruthy();
+    expect(
+      await rowCount(db, "select count(*) from admin_permissions where user_id = $1", [
+        userIdA,
+      ])
+    ).toBe(1);
+  });
+
+  it("the CHECK constraint rejects unknown permission values", async () => {
+    let threw = false;
+    try {
+      await db.query(
+        `insert into admin_permissions (user_id, permission) values ($1, 'view_everything')`,
+        [userIdA]
+      );
+    } catch (err) {
+      threw = true;
+      expect(String(err)).toMatch(/check constraint/i);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it("tenants can read only their own admin permissions", async () => {
+    await db.query(
+      `insert into admin_permissions (user_id, permission, granted_by)
+       values ($1, 'view_audit_logs', $1) on conflict do nothing`,
+      [userIdA]
+    );
+
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    const own = await rowCount(
+      db,
+      "select count(*) from admin_permissions where user_id = $1",
+      [userIdA]
+    );
+    expect(own).toBeGreaterThan(0);
+
+    const other = await rowCount(
+      db,
+      "select count(*) from admin_permissions where user_id = $1",
+      [userIdB]
+    );
+    expect(other).toBe(0);
+    await db.exec("commit;");
+  });
+
+  it("tenants cannot grant or revoke permissions (even their own)", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query(
+        `insert into admin_permissions (user_id, permission)
+         values ($1, 'view_users')`,
+        [userIdA]
+      )
+    );
+    await db.exec("rollback;");
+
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query("delete from admin_permissions where user_id = $1", [userIdA])
+    );
+    await db.exec("rollback;");
   });
 });

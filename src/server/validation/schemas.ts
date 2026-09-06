@@ -33,6 +33,12 @@ export const updateConversationSchema = z.object({
 
 export type UpdateConversationInput = z.infer<typeof updateConversationSchema>;
 
+export const reauthSchema = z.object({
+  password: z.string().min(1, "Password is required.").max(4096),
+});
+
+export type ReauthInput = z.infer<typeof reauthSchema>;
+
 /** Shared error formatting so all API consumers see the same shape. */
 export function formatZodError(err: z.ZodError): { message: string; issues: z.ZodIssue[] } {
   const first = err.issues[0];

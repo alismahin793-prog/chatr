@@ -5,6 +5,8 @@ export interface Database {
         Row: {
           id: string;
           display_name: string | null;
+          role: "user" | "admin";
+          admin_verified_at: string | null;
           created_at: string;
         };
         Insert: {
@@ -12,8 +14,48 @@ export interface Database {
           display_name?: string | null;
         };
         Update: {
-          display_name?: string | null;
+          /** Only the service role writes this — tenants cannot update it. */
+          admin_verified_at?: string | null;
         };
+        Relationships: [];
+      };
+      admin_permissions: {
+        Row: {
+          id: string;
+          user_id: string;
+          permission: string;
+          granted_at: string;
+          granted_by: string | null;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          permission: string;
+          granted_by?: string | null;
+        };
+        Update: Record<string, never>;
+        Relationships: [];
+      };
+      audit_log: {
+        Row: {
+          id: string;
+          actor_id: string | null;
+          action: string;
+          resource_type: string | null;
+          resource_id: string | null;
+          success: boolean;
+          metadata: Record<string, unknown>;
+          created_at: string;
+        };
+        Insert: {
+          actor_id?: string | null;
+          action: string;
+          resource_type?: string | null;
+          resource_id?: string | null;
+          success?: boolean;
+          metadata?: Record<string, unknown>;
+        };
+        Update: Record<string, never>;
         Relationships: [];
       };
       conversations: {
