@@ -16,10 +16,19 @@ import {
 } from "@/server/data/conversations";
 import { listMessages } from "@/server/data/messages";
 import { NotFoundError } from "@/server/errors";
+import { requireCapability } from "@/server/auth/capabilities";
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(),
 }));
+
+vi.mock("@/server/auth/capabilities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/auth/capabilities")>();
+  return {
+    ...actual,
+    requireCapability: vi.fn(),
+  };
+});
 
 vi.mock("@/server/data/conversations", () => ({
   listConversations: vi.fn(),
@@ -69,6 +78,7 @@ function ctx(id: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockAuth();
+  vi.mocked(requireCapability).mockResolvedValue(undefined);
 });
 
 afterEach(() => {

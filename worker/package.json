@@ -1,0 +1,8 @@
+{
+  "name": "chatr-cloud-execution-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real, isolated, authenticated Cloud Execution worker for Chatr Cloud Development.",
+  "type": "commonjs",
+  "main": "dist/worker/src/index.js"
+}

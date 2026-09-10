@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 function AuthFormInner({ mode }: { mode: "login" | "signup" }) {
@@ -16,8 +16,15 @@ function AuthFormInner({ mode }: { mode: "login" | "signup" }) {
       : null
   );
   const [notice, setNotice] = useState<string | null>(null);
+  const nextRef = useRef(searchParams.get("next") ?? null);
 
   const isSignup = mode === "signup";
+
+  useEffect(() => {
+    if (nextRef.current === null) {
+      nextRef.current = searchParams.get("next");
+    }
+  }, [searchParams]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -35,7 +42,7 @@ function AuthFormInner({ mode }: { mode: "login" | "signup" }) {
         });
         if (error) throw error;
         if (data.session) {
-          router.push("/chat");
+          router.push(nextRef.current ?? "/chat");
           router.refresh();
         } else {
           setNotice(
@@ -46,7 +53,11 @@ function AuthFormInner({ mode }: { mode: "login" | "signup" }) {
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        router.push("/chat");
+        const next = nextRef.current;
+        // Never send users to an arbitrary external URL after sign-in.
+        const safeNext =
+          next && next.startsWith("/") && !next.startsWith("//") ? next : "/chat";
+        router.push(safeNext);
         router.refresh();
       }
     } catch (err) {

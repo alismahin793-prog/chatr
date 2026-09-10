@@ -1,0 +1,10 @@
+# Railway deployment config for the Cloud Execution Worker (Phase 2-C).
+# Only used by the Railway service; the Next.js app itself deploys via Vercel.
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "node dist/worker/src/index.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ALWAYS"

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useAdminI18n } from "@/i18n/LanguageProvider";
 
 interface ReauthModalProps {
   open: boolean;
@@ -21,10 +22,13 @@ export default function ReauthModal({
   open,
   onClose,
   onReauthenticated,
-  title = "Re-authenticate",
-  description = "This action requires you to re-enter your password to confirm your identity.",
+  title,
+  description,
 }: ReauthModalProps) {
   const router = useRouter();
+  const { t } = useAdminI18n();
+  const resolvedTitle = title ?? t("reauth.title");
+  const resolvedDescription = description ?? t("reauth.description");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -45,7 +49,7 @@ export default function ReauthModal({
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         setError(
-          body?.error?.message ?? "Re-authentication failed. Please try again."
+          body?.error?.message ?? t("reauth.failed")
         );
         setPassword("");
         return;
@@ -53,7 +57,7 @@ export default function ReauthModal({
       setPassword("");
       onReauthenticated();
     } catch {
-      setError("A network error occurred. Please try again.");
+      setError(t("reauth.networkError"));
     } finally {
       setSubmitting(false);
       router.refresh();
@@ -64,7 +68,7 @@ export default function ReauthModal({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={title}
+      aria-label={resolvedTitle}
       className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4"
       onClick={onClose}
     >
@@ -72,8 +76,8 @@ export default function ReauthModal({
         className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-lg ring-1 ring-zinc-200"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-semibold text-zinc-900">{title}</h2>
-        <p className="mt-1 text-sm text-zinc-500">{description}</p>
+        <h2 className="text-lg font-semibold text-zinc-900">{resolvedTitle}</h2>
+        <p className="mt-1 text-sm text-zinc-500">{resolvedDescription}</p>
 
         {error && (
           <div
@@ -86,7 +90,7 @@ export default function ReauthModal({
 
         <form onSubmit={onSubmit} className="mt-5 space-y-4">
           <label className="block">
-            <span className="text-sm font-medium text-zinc-700">Password</span>
+            <span className="text-sm font-medium text-zinc-700">{t("reauth.password")}</span>
             <input
               type="password"
               required
@@ -104,14 +108,14 @@ export default function ReauthModal({
               onClick={onClose}
               className="rounded-md px-3 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100"
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="submit"
               disabled={submitting}
               className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {submitting ? "Verifying…" : "Confirm"}
+              {submitting ? t("reauth.verifying") : t("reauth.confirm")}
             </button>
           </div>
         </form>

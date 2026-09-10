@@ -10,8 +10,23 @@ import { insertMessage, listMessages } from "@/server/data/messages";
 import { createProvider, fallbackProviderIds } from "@/server/ai/factory";
 import type { ChatProvider } from "@/server/ai/types";
 import { ProviderError } from "@/server/ai/errors";
+import { recordAiRequest } from "@/server/ai/usage";
+import { requireCapability } from "@/server/auth/capabilities";
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+vi.mock("@/lib/supabase/service", () => ({
+  createServiceClient: vi.fn(() => ({ from: vi.fn() })),
+}));
+
+vi.mock("@/server/ai/usage", () => ({ recordAiRequest: vi.fn() }));
+
+vi.mock("@/server/auth/capabilities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/auth/capabilities")>();
+  return {
+    ...actual,
+    requireCapability: vi.fn(),
+  };
+});
 
 vi.mock("@/server/data/conversations", () => ({
   createConversation: vi.fn(),
@@ -121,6 +136,8 @@ beforeEach(() => {
   );
   vi.mocked(fallbackProviderIds).mockReturnValue([]);
   vi.mocked(updateConversationProvider).mockResolvedValue(CONVERSATION);
+  vi.mocked(requireCapability).mockResolvedValue(undefined);
+  vi.mocked(recordAiRequest).mockResolvedValue(undefined);
 });
 
 describe("POST /api/chat", () => {
@@ -147,6 +164,32 @@ describe("POST /api/chat", () => {
     const done = events[2].data as { conversationId: string; message: { content: string } };
     expect(done.conversationId).toBe(CONV_ID);
     expect(done.message.content).toBe("Hello");
+  });
+
+  it("records AI request telemetry on a successful completion", async () => {
+    vi.mocked(createProvider).mockReturnValue(stubProvider(["hi"]));
+
+    const res = await POST(chatRequest({ conversationId: CONV_ID, content: "telemetry" }));
+    expect(res.status).toBe(200);
+    await readEvents(res);
+
+    expect(recordAiRequest).toHaveBeenCalledWith(expect.anything(), {
+      userId: USER.id,
+      conversationId: CONV_ID,
+      provider: "mock",
+      model: "mock-1",
+    });
+  });
+
+  it("does not record telemetry when streaming fails mid-response", async () => {
+    vi.mocked(createProvider).mockReturnValue(
+      stubProvider(["par"], new ProviderError("mock", "RATE_LIMITED", "limit", true, 429))
+    );
+
+    const res = await POST(chatRequest({ content: "boom" }));
+    await readEvents(res);
+
+    expect(recordAiRequest).not.toHaveBeenCalled();
   });
 
   it("continues an existing owned conversation with bounded context", async () => {

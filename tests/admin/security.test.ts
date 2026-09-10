@@ -3,12 +3,14 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import {
   ADMIN_SESSION_TTL_MS,
+  adminGuardRedirectPath,
   adminWindowStatus,
   clearAdminVerified,
   markAdminVerified,
   requireAdmin,
   requireAdminIdentity,
   verifyPassword,
+  type AdminGuardRedirect,
   type AdminWindowStatus,
 } from "@/server/admin/security";
 import { requireUser } from "@/server/api/helpers";
@@ -30,6 +32,7 @@ const USER: User = {
 
 function fakeSupabase(profile: {
   role: string | null;
+  status: string | null;
   admin_verified_at: string | null;
 }) {
   return {
@@ -46,15 +49,19 @@ function fakeSupabase(profile: {
   } as unknown as SupabaseClient<Database>;
 }
 
-function mockIdentity(profile: { role: string; admin_verified_at: string | null }) {
+function mockIdentity(profile: {
+  role: string;
+  status: string;
+  admin_verified_at: string | null;
+}) {
   const supabase = fakeSupabase(profile);
   vi.mocked(requireUser).mockResolvedValue({ supabase, user: USER } as never);
   vi.mocked(createServiceClient).mockReturnValue({} as never);
   return supabase;
 }
 
-function profile(role: string, admin_verified_at: string | null) {
-  return { role, admin_verified_at };
+function profile(role: string, status: string, admin_verified_at: string | null) {
+  return { role, status, admin_verified_at };
 }
 
 beforeEach(() => {
@@ -84,26 +91,66 @@ describe("adminWindowStatus (30-second security window)", () => {
   });
 });
 
-describe("requireAdminIdentity", () => {
+describe("adminGuardRedirectPath (distinguish unauthenticated from unauthorized)", () => {
+  it("sends an unauthenticated caller to /login", () => {
+    expect(adminGuardRedirectPath(new UnauthorizedError())).toBe<AdminGuardRedirect>(
+      "/login"
+    );
+  });
+
+  it("sends a signed-in non-admin to the access-denied page", () => {
+    expect(adminGuardRedirectPath(new ForbiddenError())).toBe<AdminGuardRedirect>(
+      "/admin/denied"
+    );
+  });
+
+  it("fails closed to /login for unexpected errors", () => {
+    expect(adminGuardRedirectPath(new Error("boom"))).toBe<AdminGuardRedirect>("/login");
+  });
+});
+
+describe("requireAdminIdentity (super_admin role + approved status)", () => {
   it("rejects a signed-in normal user (deny by default)", async () => {
-    mockIdentity(profile("user", null));
+    mockIdentity(profile("user", "approved", null));
+    await expect(requireAdminIdentity()).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects a legacy 'admin' role even when approved", async () => {
+    mockIdentity(profile("admin", "approved", null));
     await expect(requireAdminIdentity()).rejects.toBeInstanceOf(ForbiddenError);
   });
 
   it("rejects a user with no profile row at all", async () => {
-    mockIdentity(profile("user", null));
     vi.mocked(requireUser).mockResolvedValue({
-      supabase: fakeSupabase({ role: null, admin_verified_at: null }),
+      supabase: fakeSupabase({ role: null, status: null, admin_verified_at: null }),
       user: USER,
     } as never);
     await expect(requireAdminIdentity()).rejects.toBeInstanceOf(ForbiddenError);
   });
 
-  it("accepts an admin regardless of the security window", async () => {
-    mockIdentity(profile("admin", null));
+  it("rejects a super_admin whose account is pending (not yet approved)", async () => {
+    mockIdentity(profile("super_admin", "pending", null));
+    await expect(requireAdminIdentity()).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects a super_admin whose account is rejected or disabled", async () => {
+    mockIdentity(profile("super_admin", "rejected", null));
+    await expect(requireAdminIdentity()).rejects.toBeInstanceOf(ForbiddenError);
+    mockIdentity(profile("super_admin", "disabled", null));
+    await expect(requireAdminIdentity()).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("accepts an approved super_admin regardless of the security window", async () => {
+    mockIdentity(profile("super_admin", "approved", null));
     const ctx = await requireAdminIdentity();
     expect(ctx.user.id).toBe(USER.id);
     expect(createServiceClient).toHaveBeenCalled();
+  });
+
+  it("accepts a super_admin with a legacy 'active' status", async () => {
+    mockIdentity(profile("super_admin", "active", null));
+    const ctx = await requireAdminIdentity();
+    expect(ctx.user.id).toBe(USER.id);
   });
 
   it("propagates an unauthenticated caller", async () => {
@@ -113,9 +160,9 @@ describe("requireAdminIdentity", () => {
 });
 
 describe("requireAdmin", () => {
-  it("allows an admin whose password was verified within the window", async () => {
+  it("allows an approved super_admin whose password was verified within the window", async () => {
     const verifiedAt = new Date().toISOString();
-    mockIdentity(profile("admin", verifiedAt));
+    mockIdentity(profile("super_admin", "approved", verifiedAt));
     const ctx = await requireAdmin();
     expect(ctx.verifiedAt).toBe(verifiedAt);
     expect(Date.parse(ctx.expiresAt)).toBe(Date.parse(verifiedAt) + ADMIN_SESSION_TTL_MS);
@@ -123,17 +170,28 @@ describe("requireAdmin", () => {
 
   it("requires re-authentication after the 30-second window expires", async () => {
     const stale = new Date(Date.now() - ADMIN_SESSION_TTL_MS - 1).toISOString();
-    mockIdentity(profile("admin", stale));
+    mockIdentity(profile("super_admin", "approved", stale));
     await expect(requireAdmin()).rejects.toBeInstanceOf(AdminReauthRequiredError);
   });
 
   it("requires re-authentication when the admin never verified", async () => {
-    mockIdentity(profile("admin", null));
+    mockIdentity(profile("super_admin", "approved", null));
+    await expect(requireAdmin()).rejects.toBeInstanceOf(AdminReauthRequiredError);
+  });
+
+  it("still requires the 30-second window even for a super_admin", async () => {
+    const stale = new Date(Date.now() - ADMIN_SESSION_TTL_MS - 1).toISOString();
+    mockIdentity(profile("super_admin", "approved", stale));
     await expect(requireAdmin()).rejects.toBeInstanceOf(AdminReauthRequiredError);
   });
 
   it("rejects a normal user (deny by default, even with an active window)", async () => {
-    mockIdentity(profile("user", new Date().toISOString()));
+    mockIdentity(profile("user", "approved", new Date().toISOString()));
+    await expect(requireAdmin()).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("rejects a pending super_admin even with an active window", async () => {
+    mockIdentity(profile("super_admin", "pending", new Date().toISOString()));
     await expect(requireAdmin()).rejects.toBeInstanceOf(ForbiddenError);
   });
 });
@@ -168,7 +226,7 @@ describe("markAdminVerified / clearAdminVerified", () => {
 
 describe("verifyPassword", () => {
   it("verifies a correct password via GoTrue without storing it", async () => {
-    const supabase = fakeSupabase(profile("admin", null));
+    const supabase = fakeSupabase(profile("super_admin", "approved", null));
     vi.mocked(supabase.auth.signInWithPassword).mockResolvedValue({
       data: { user: USER, session: { access_token: "token" } },
       error: null,
@@ -182,7 +240,7 @@ describe("verifyPassword", () => {
   });
 
   it("reports a wrong password without throwing or logging it", async () => {
-    const supabase = fakeSupabase(profile("admin", null));
+    const supabase = fakeSupabase(profile("super_admin", "approved", null));
     vi.mocked(supabase.auth.signInWithPassword).mockResolvedValue({
       data: null,
       error: { message: "Invalid login credentials", status: 400, name: "AuthApiError" },

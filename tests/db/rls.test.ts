@@ -28,6 +28,26 @@ const PERMISSIONS_MIGRATION = resolve(
   "supabase/migrations/20260103000000_admin_permissions.sql"
 );
 
+const TEST_USERS_MIGRATION = resolve(
+  process.cwd(),
+  "supabase/migrations/20260104000000_test_users.sql"
+);
+
+const PLATFORM_MIGRATION = resolve(
+  process.cwd(),
+  "supabase/migrations/20260105000000_admin_platform.sql"
+);
+
+const SUPER_ADMIN_MIGRATION = resolve(
+  process.cwd(),
+  "supabase/migrations/20260106000000_super_admin_approval.sql"
+);
+
+const FINAL_MIGRATION = resolve(
+  process.cwd(),
+  "supabase/migrations/20260107000000_super_admin_final.sql"
+);
+
 /** Reads a migration and neutralizes the pgcrypto prelude for PGlite. */
 function readMigration(path: string) {
   return readFileSync(path, "utf8").replace(
@@ -99,11 +119,15 @@ describe("supabase migration + RLS data isolation", () => {
       $$;
     `);
 
-    // --- apply the real migrations (init + admin security + permissions) --
+    // --- apply the real migrations (init + admin security + permissions + test users + platform + super_admin) --
     const migrationSql = [
       readMigration(INIT_MIGRATION),
       readMigration(ADMIN_MIGRATION),
       readMigration(PERMISSIONS_MIGRATION),
+      readMigration(TEST_USERS_MIGRATION),
+      readMigration(PLATFORM_MIGRATION),
+      readMigration(SUPER_ADMIN_MIGRATION),
+      readMigration(FINAL_MIGRATION),
     ].join("\n\n-- ===== subsequent migration =====\n\n");
     await db.exec(migrationSql);
 
@@ -134,6 +158,16 @@ describe("supabase migration + RLS data isolation", () => {
       revoke all on public.admin_permissions from authenticated;
       grant select on public.admin_permissions to authenticated;
       grant select on public.admin_permissions to anon;
+      revoke all on public.app_permissions from anon;
+      revoke all on public.app_permissions from authenticated;
+      grant select on public.app_permissions to authenticated;
+      grant select on public.app_permissions to anon;
+      revoke all on public.features from anon;
+      revoke all on public.features from authenticated;
+      revoke all on public.improvement_proposals from anon;
+      revoke all on public.improvement_proposals from authenticated;
+      revoke all on public.ai_request_log from anon;
+      revoke all on public.ai_request_log from authenticated;
     `);
 
     // Emulate GoTrue creating two users (profile rows are auto-created).
@@ -168,8 +202,12 @@ describe("supabase migration + RLS data isolation", () => {
     );
     expect(tables.rows.map((r) => r.tablename)).toEqual([
       "admin_permissions",
+      "ai_request_log",
+      "app_permissions",
       "audit_log",
       "conversations",
+      "features",
+      "improvement_proposals",
       "messages",
       "profiles",
     ]);
@@ -183,11 +221,15 @@ describe("supabase migration + RLS data isolation", () => {
       expect.arrayContaining([
         "conversations_user_updated_idx",
         "messages_conversation_created_idx",
+        "features_key_idx",
+        "improvement_proposals_status_idx",
+        "ai_request_log_created_idx",
+        "app_permissions_user_idx",
       ])
     );
 
     const rls = await db.query<{ relrowsecurity: boolean }>(
-      `select relrowsecurity from pg_class where relname in ('profiles','conversations','messages','audit_log','admin_permissions')`,
+      `select relrowsecurity from pg_class where relname in ('profiles','conversations','messages','audit_log','admin_permissions','app_permissions','features','improvement_proposals','ai_request_log')`,
       []
     );
     expect(rls.rows.map((r) => r.relrowsecurity).every((v) => v === true)).toBe(true);
@@ -377,6 +419,78 @@ describe("supabase migration + RLS data isolation", () => {
     await db.exec("rollback;");
   });
 
+  it("tenants cannot promote themselves to super_admin and cannot forge status", async () => {
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query("update profiles set role = 'super_admin' where id = $1", [userIdA])
+    );
+    await db.exec("rollback;");
+
+    // status is service-role only too — a tenant cannot self-approve.
+    await db.exec("begin;");
+    await db.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+    );
+    await db.exec("set local role authenticated;");
+
+    await expectPermissionDenied(
+      db.query("update profiles set status = 'approved' where id = $1", [userIdA])
+    );
+    await db.exec("rollback;");
+  });
+
+  it("new signups are pending until an admin approves them (migration 6 default)", async () => {
+    const [newUser] = (
+      await db.query<{ id: string }>(
+        `insert into auth.users (id, email, raw_user_meta_data)
+         values (gen_random_uuid(), 'carol@example.com', '{"display_name":"Carol"}')
+         returning id`,
+        []
+      )
+    ).rows;
+    const [row] = (
+      await db.query<{ role: string; status: string }>(
+        "select role, status from profiles where id = $1",
+        [newUser.id]
+      )
+    ).rows;
+    expect(row.role).toBe("user");
+    expect(row.status).toBe("pending");
+  });
+
+  it("the super_admin role and approval statuses are legal values (service role)", async () => {
+    // Table owner (service-role equivalent) can grant the top role and move
+    // the account through the approval lifecycle.
+    await db.query(
+      "update profiles set role = 'super_admin', status = 'approved' where id = $1",
+      [userIdA]
+    );
+    const [row] = (
+      await db.query<{ role: string; status: string }>(
+        "select role, status from profiles where id = $1",
+        [userIdA]
+      )
+    ).rows;
+    expect(row.role).toBe("super_admin");
+    expect(row.status).toBe("approved");
+
+    await db.query("update profiles set status = 'rejected' where id = $1", [userIdA]);
+    const [rejected] = (
+      await db.query<{ status: string }>(
+        "select status from profiles where id = $1",
+        [userIdA]
+      )
+    ).rows;
+    expect(rejected.status).toBe("rejected");
+  });
+
   it("tenants cannot forge an admin re-authentication timestamp", async () => {
     await db.exec("begin;");
     await db.query(
@@ -450,9 +564,68 @@ describe("supabase migration + RLS data isolation", () => {
     expect(await rowCount(db, "select count(*) from audit_log", [])).toBe(1);
   });
 
+  it("platform tables are unreadable and unwritable by tenants", async () => {
+    // features / improvement_proposals / ai_request_log are service-role only.
+    // Each denial runs in its own transaction: once a statement fails, the
+    // current transaction is aborted, so reusing it would mask later denials.
+    const denials = [
+      "select count(*) from features",
+      "select count(*) from improvement_proposals",
+      "select count(*) from ai_request_log",
+      "insert into features (key, name) values ('x', 'X')",
+      "update features set enabled = true",
+    ];
+    for (const sql of denials) {
+      await db.exec("begin;");
+      await db.query(
+        "select set_config('request.jwt.claims', $1, true)",
+        [JSON.stringify({ sub: userIdA, role: "authenticated" })]
+      );
+      await db.exec("set local role authenticated;");
+      await expectPermissionDenied(db.query(sql, []));
+      await db.exec("rollback;");
+    }
+  });
+
+  it("the service role can seed and toggle features", async () => {
+    // Mirrors the service role: table owner can insert and update.
+    // 'internal_test_feature' is not part of the migration's seed registry.
+    const [row] = (
+      await db.query<{ key: string; enabled: boolean }>(
+        `insert into features (key, name, enabled, available_to_users)
+         values ('internal_test_feature', 'Internal Test', true, false)
+         returning key, enabled`,
+        []
+      )
+    ).rows;
+    expect(row.enabled).toBe(true);
+
+    await db.query(
+      "update features set enabled = false where key = 'internal_test_feature'",
+      []
+    );
+    const [after] = (
+      await db.query<{ enabled: boolean }>(
+        "select enabled from features where key = 'internal_test_feature'",
+        []
+      )
+    ).rows;
+    expect(after.enabled).toBe(false);
+  });
+
   it("no user has any admin permission by default", async () => {
     const count = await rowCount(db, "select count(*) from admin_permissions", []);
     expect(count).toBe(0);
+  });
+
+  it("the CHECK constraint accepts manage_features after migration 5", async () => {
+    const ok = await db.query<{ permission: string }>(
+      `insert into admin_permissions (user_id, permission)
+       values ($1, 'manage_features') on conflict do nothing returning permission`,
+      [userIdA]
+    );
+    expect(ok.rows).toHaveLength(1);
+    expect(ok.rows[0].permission).toBe("manage_features");
   });
 
   it("service role can grant and revoke admin permissions", async () => {
@@ -465,9 +638,11 @@ describe("supabase migration + RLS data isolation", () => {
     ).rows;
     expect(row.id).toBeTruthy();
     expect(
-      await rowCount(db, "select count(*) from admin_permissions where user_id = $1", [
-        userIdA,
-      ])
+      await rowCount(
+        db,
+        "select count(*) from admin_permissions where user_id = $1 and permission = 'view_users'",
+        [userIdA]
+      )
     ).toBe(1);
   });
 
@@ -543,5 +718,107 @@ describe("supabase migration + RLS data isolation", () => {
       db.query("delete from admin_permissions where user_id = $1", [userIdA])
     );
     await db.exec("rollback;");
+  });
+
+  it("migration 7: only 'user' and 'super_admin' roles exist after demotion", async () => {
+    const legacy = await rowCount(
+      db,
+      "select count(*) from profiles where role not in ('user', 'super_admin')",
+      []
+    );
+    expect(legacy).toBe(0);
+  });
+
+  it("migration 7: the role CHECK rejects a legacy 'admin' value", async () => {
+    let threw = false;
+    try {
+      await db.query(
+        "update profiles set role = 'admin' where id = $1",
+        [userIdB]
+      );
+    } catch (err) {
+      threw = true;
+      expect(String(err)).toMatch(/check constraint/i);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it("migration 7: the role CHECK rejects arbitrary invented roles", async () => {
+    let threw = false;
+    try {
+      await db.query(
+        "update profiles set role = 'owner' where id = $1",
+        [userIdB]
+      );
+    } catch (err) {
+      threw = true;
+      expect(String(err)).toMatch(/check constraint/i);
+    }
+    expect(threw).toBe(true);
+    const [row] = (
+      await db.query<{ role: string }>(
+        "select role from profiles where id = $1",
+        [userIdB]
+      )
+    ).rows;
+    expect(row.role).toBe("user");
+  });
+
+  it("migration 7: legacy 'active' status was unified and every row is legal", async () => {
+    const active = await rowCount(db, "select count(*) from profiles where status = 'active'", []);
+    expect(active).toBe(0);
+    // No profile may carry a status outside the final four.
+    const illegal = await rowCount(
+      db,
+      "select count(*) from profiles where status not in ('pending', 'approved', 'rejected', 'disabled')",
+      []
+    );
+    expect(illegal).toBe(0);
+  });
+
+  it("migration 7: the status CHECK rejects the removed 'active' value", async () => {
+    let threw = false;
+    try {
+      await db.query(
+        "update profiles set status = 'active' where id = $1",
+        [userIdB]
+      );
+    } catch (err) {
+      threw = true;
+      expect(String(err)).toMatch(/check constraint/i);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it("migration 7: all four approved statuses are legal (service role)", async () => {
+    for (const status of ["pending", "approved", "rejected", "disabled"]) {
+      await db.query("update profiles set status = $1 where id = $2", [status, userIdB]);
+    }
+    const [row] = (
+      await db.query<{ status: string }>(
+        "select status from profiles where id = $1",
+        [userIdB]
+      )
+    ).rows;
+    expect(row.status).toBe("disabled");
+  });
+
+  it("migration 7: new signups still default to 'pending' with role 'user'", async () => {
+    const [nu] = (
+      await db.query<{ id: string }>(
+        `insert into auth.users (id, email, raw_user_meta_data)
+         values (gen_random_uuid(), 'migration7@example.com', '{}'::jsonb)
+         returning id`,
+        []
+      )
+    ).rows;
+    const [row] = (
+      await db.query<{ role: string; status: string }>(
+        "select role, status from profiles where id = $1",
+        [nu.id]
+      )
+    ).rows;
+    expect(row.role).toBe("user");
+    expect(row.status).toBe("pending");
   });
 });

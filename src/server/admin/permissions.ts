@@ -6,6 +6,7 @@ import { ForbiddenError } from "@/server/errors";
 import {
   type AdminContext,
   type AdminIdentityContext,
+  SUPER_ADMIN_ROLE,
   requireAdmin,
   requireAdminIdentity,
 } from "@/server/admin/security";
@@ -39,6 +40,8 @@ export const PERMISSIONS = {
   CREATE_DEV_REQUESTS: "create_dev_requests",
   APPROVE_DEV_PLANS: "approve_dev_plans",
   APPROVE_DEPLOYMENTS: "approve_deployments",
+  // FEATURES
+  MANAGE_FEATURES: "manage_features",
 } as const;
 
 export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -58,6 +61,7 @@ export const SENSITIVE_PERMISSIONS: readonly Permission[] = [
   PERMISSIONS.REVOKE_USER_SESSIONS,
   PERMISSIONS.APPROVE_DEV_PLANS,
   PERMISSIONS.APPROVE_DEPLOYMENTS,
+  PERMISSIONS.MANAGE_FEATURES,
 ];
 
 /** Permission groups for sidebar rendering. */
@@ -106,6 +110,12 @@ export const PERMISSION_GROUPS = {
       PERMISSIONS.APPROVE_DEPLOYMENTS,
     ],
   },
+  FEATURES: {
+    label: "Features",
+    permissions: [
+      PERMISSIONS.MANAGE_FEATURES,
+    ],
+  },
 } as const;
 
 export type PermissionGroupKey = keyof typeof PERMISSION_GROUPS;
@@ -145,14 +155,36 @@ export function isSensitivePermission(permission: Permission): boolean {
 }
 
 /**
- * Reads all permissions granted to a user. Uses the user-scoped client
- * (subject to RLS: users can only read their own permissions) or the
- * service client when called from server code.
+ * Loads the caller's profile role so read helpers can treat a super_admin as
+ * implicitly holding every permission (state-of-the-art least privilege for
+ * the explicit rows below).
+ */
+async function profileRole(
+  client: SupabaseClient<Database>,
+  userId: string
+): Promise<string | null> {
+  const { data, error } = await client
+    .from("profiles")
+    .select("role")
+    .eq("id", userId)
+    .maybeSingle();
+  if (error) throw supabaseErrorToAppError(error);
+  return data?.role ?? null;
+}
+
+/**
+ * Reads all permissions a user effectively holds. A super_admin implicitly
+ * holds every permission (no admin_permissions rows required); other account
+ * types are limited to their explicit grants, read from their own RLS-visible
+ * rows or through the service client.
  */
 export async function getUserPermissions(
   client: SupabaseClient<Database>,
   userId: string
 ): Promise<Permission[]> {
+  const role = await profileRole(client, userId);
+  if (role === SUPER_ADMIN_ROLE) return [...ALL_PERMISSIONS];
+
   const { data, error } = await client
     .from("admin_permissions")
     .select("permission")
@@ -162,13 +194,17 @@ export async function getUserPermissions(
 }
 
 /**
- * Checks whether a user holds a specific permission.
+ * Checks whether a user effectively holds a specific permission. super_admin
+ * always does; everyone else only when an explicit grant exists.
  */
 export async function hasPermission(
   client: SupabaseClient<Database>,
   userId: string,
   permission: Permission
 ): Promise<boolean> {
+  const role = await profileRole(client, userId);
+  if (role === SUPER_ADMIN_ROLE) return true;
+
   const { data, error } = await client
     .from("admin_permissions")
     .select("permission")

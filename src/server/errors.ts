@@ -15,7 +15,7 @@ export class AppError extends Error {
   constructor(
     public readonly code: ErrorCode,
     message: string,
-    public readonly status: number,
+    public readonly status: number = 500,
     options?: ErrorOptions
   ) {
     super(message, options);
@@ -52,6 +52,13 @@ export class ForbiddenError extends AppError {
  * The caller is an admin but their privileges have expired and they must
  * re-authenticate before the privileges are restored.
  */
+/** A state-machine or possession conflict (e.g. wrong lifecycle status). */
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super("conflict", message, 409);
+  }
+}
+
 export class AdminReauthRequiredError extends AppError {
   constructor(message = "Admin re-authentication is required.") {
     super("reauth_required", message, 401);

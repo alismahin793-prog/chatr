@@ -3,10 +3,14 @@ import type { Database } from "@/lib/supabase/database.types";
 import { createServiceClient } from "@/lib/supabase/service";
 import { requireUser } from "@/server/api/helpers";
 import { supabaseErrorToAppError } from "@/server/data/errors";
+import { SUPER_ADMIN_ROLE, USER_ROLE } from "@/lib/shared/roles";
 import { AdminReauthRequiredError, ForbiddenError } from "@/server/errors";
 
-export const ADMIN_ROLE = "admin";
-export const USER_ROLE = "user";
+export { SUPER_ADMIN_ROLE, USER_ROLE };
+
+export function isSuperAdminRole(role: string | null | undefined): boolean {
+  return role === SUPER_ADMIN_ROLE;
+}
 
 /** How long a verified admin stays privileged before re-authentication. */
 export const ADMIN_SESSION_TTL_SECONDS = 30;
@@ -18,6 +22,7 @@ export interface AdminIdentityContext {
   user: User;
   profile: {
     role: string | null;
+    status: string | null;
     admin_verified_at: string | null;
     display_name: string | null;
   };
@@ -29,6 +34,19 @@ export interface AdminContext extends AdminIdentityContext {
 }
 
 export type AdminWindowStatus = "active" | "expired" | "never";
+
+export type AdminGuardRedirect = "/login" | "/admin/denied";
+
+/**
+ * Maps an admin-route guard failure to the correct destination. The two
+ * states are intentionally different:
+ * - UnauthorizedError (not signed in) → /login (must authenticate first)
+ * - ForbiddenError (signed in but not an admin) → /admin/denied (Access Denied)
+ * - anything else (fail closed) → /login, the historical catch-all
+ */
+export function adminGuardRedirectPath(error: unknown): AdminGuardRedirect {
+  return error instanceof ForbiddenError ? "/admin/denied" : "/login";
+}
 
 /**
  * Pure check of the 30-second admin re-authentication window.
@@ -51,27 +69,36 @@ async function loadAdminProfile(
 ): Promise<AdminIdentityContext["profile"]> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("role, admin_verified_at, display_name")
+    .select("role, status, admin_verified_at, display_name")
     .eq("id", userId)
     .maybeSingle();
   if (error) throw supabaseErrorToAppError(error);
-  return data ?? { role: null, admin_verified_at: null, display_name: null };
+  return (
+    data ?? {
+      role: null,
+      status: null,
+      admin_verified_at: null,
+      display_name: null,
+    }
+  );
 }
 
 /**
- * Authorizes the caller as an admin ON THE SERVER (never client-side): the
- * user must be signed in AND hold the "admin" role in their profile. This
- * does not check the re-authentication window — it is the gate used by the
- * re-authentication endpoint itself.
+ * Authorizes the caller as ADMIN ON THE SERVER (never client-side): the user
+ * must be signed in AND their profile MUST be role = "super_admin" with an
+ * approved (or legacy "active") status. Plain "admin"/"user" accounts are
+ * denied — the system has exactly two roles. This is the gate used by every
+ * admin page/API and by the re-authentication endpoint itself.
  *
- * Every future admin API route must start with requireAdmin() or
+ * Every future admin route must start with requireAdmin() or
  * requireAdminIdentity(); never rely on the UI to block access.
  */
 export async function requireAdminIdentity(): Promise<AdminIdentityContext> {
   const { supabase, user } = await requireUser();
   const profile = await loadAdminProfile(supabase, user.id);
-  if (profile.role !== ADMIN_ROLE) {
-    throw new ForbiddenError("Admin privileges required.");
+  const approved = profile.status === "approved" || profile.status === "active";
+  if (!isSuperAdminRole(profile.role) || !approved) {
+    throw new ForbiddenError("Super admin privileges required.");
   }
   return { supabase, service: createServiceClient(), user, profile };
 }

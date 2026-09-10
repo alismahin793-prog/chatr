@@ -6,12 +6,14 @@ import {
   formatZodError,
 } from "@/server/validation/schemas";
 import { ValidationError } from "@/server/errors";
+import { CAPABILITIES, requireCapability } from "@/server/auth/capabilities";
 
 export const runtime = "nodejs";
 
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
+    await requireCapability(supabase, user.id, CAPABILITIES.CHAT);
     const conversations = await listConversations(supabase, user.id);
     return NextResponse.json({ conversations });
   } catch (err) {
@@ -22,6 +24,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const { supabase, user } = await requireUser();
+    await requireCapability(supabase, user.id, CAPABILITIES.CHAT);
     const body = await readJsonBody<unknown>(request);
     const parsed = createConversationSchema.safeParse(body);
     if (!parsed.success) {

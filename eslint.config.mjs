@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Compiled Cloud Execution worker output (tsc CommonJS emit).
+    "worker/dist/**",
   ]),
 ]);
 

@@ -44,5 +44,8 @@ supabase/.temp
 *.tsbuildinfo
 next-env.d.ts
 
+# cloud execution worker build output
+/worker/dist/
+
 .vercel
 .env*

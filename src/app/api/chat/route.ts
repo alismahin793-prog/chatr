@@ -1,7 +1,10 @@
 import type { ChatMessage, ChatProvider, ProviderId } from "@/server/ai/types";
 import { createProvider, fallbackProviderIds } from "@/server/ai/factory";
 import { ProviderError } from "@/server/ai/errors";
+import { recordAiRequest } from "@/server/ai/usage";
 import { requireUser, readJsonBody, toApiError, providerErrorMessage } from "@/server/api/helpers";
+import { CAPABILITIES, requireCapability } from "@/server/auth/capabilities";
+import { createServiceClient } from "@/lib/supabase/service";
 import { getAiSettings, maxContextMessages } from "@/server/config/env";
 import {
   createConversation,
@@ -33,6 +36,7 @@ function userFacingMessage(err: ProviderError): string {
 export async function POST(request: Request) {
   try {
     const { supabase, user } = await requireUser();
+    await requireCapability(supabase, user.id, CAPABILITIES.CHAT);
     const body = await readJsonBody<unknown>(request);
     const parsed = sendMessageSchema.safeParse(body);
     if (!parsed.success) throw new ValidationError(formatZodError(parsed.error).message);
@@ -125,6 +129,13 @@ export async function POST(request: Request) {
             "assistant",
             assistantText
           );
+          // Fire-and-forget telemetry: never throws, never delays the stream.
+          void recordAiRequest(createServiceClient(), {
+            userId: user.id,
+            conversationId: conversation.id,
+            provider: usedProviderId,
+            model: usedModel ?? "",
+          });
           sendEvent(controller, "done", {
             conversationId: conversation.id,
             message: assistantMessage,

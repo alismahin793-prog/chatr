@@ -4,6 +4,7 @@ import { listMessages } from "@/server/data/messages";
 import { conversationIdSchema, formatZodError } from "@/server/validation/schemas";
 import { NotFoundError, ValidationError } from "@/server/errors";
 import { requireUser, toApiError } from "@/server/api/helpers";
+import { CAPABILITIES, requireCapability } from "@/server/auth/capabilities";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,7 @@ export async function GET(
     if (!parsedId.success) throw new ValidationError(formatZodError(parsedId.error).message);
 
     const { supabase, user } = await requireUser();
+    await requireCapability(supabase, user.id, CAPABILITIES.CHAT);
     const conversation = await getConversation(supabase, id, user.id);
     if (!conversation) throw new NotFoundError("Conversation not found.");
 
